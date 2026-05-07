@@ -9,18 +9,141 @@ if [[ `id -u` -eq 0 ]]; then
   exit 1
 fi
 
+resolve_command() {
+  command -v "$1" 2>/dev/null
+}
+
+canonical_path() {
+  if command -v realpath &>/dev/null; then
+    realpath "$1"
+  elif command -v readlink &>/dev/null; then
+    readlink -f "$1" 2>/dev/null || echo "$1"
+  else
+    echo "$1"
+  fi
+}
+
+grub_module_dir_usable() {
+  local dir="$1"
+
+  [[ -d "$dir" && -f "$dir/modinfo.sh" && -f "$dir/normal.mod" ]]
+}
+
+grub_install_default_module_dir() {
+  LC_ALL=C "$GRUB2_INSTALL" --help 2>/dev/null | awk '
+    /--directory=DIR/ { looking = 1 }
+    looking && index($0, "[default=") {
+      sub(/^.*\[default=/, "")
+      sub(/\].*$/, "")
+      print
+      exit
+    }
+  '
+}
+
+grub_module_dir_override_var() {
+  case "$1" in
+    i386-pc)
+      echo "GLIM_GRUB_I386_PC_DIR"
+      ;;
+    x86_64-efi)
+      echo "GLIM_GRUB_X86_64_EFI_DIR"
+      ;;
+  esac
+}
+
+find_grub_module_dir() {
+  local target="$1"
+  local override_var override default_dir install_path install_prefix candidate
+
+  override_var="$(grub_module_dir_override_var "$target")"
+  if [[ -n "$override_var" && -n "${!override_var}" ]]; then
+    override="${!override_var}"
+    if grub_module_dir_usable "$override"; then
+      echo "$override"
+      return 0
+    fi
+    echo "WARNING: ${override_var}=${override} is not a usable GRUB2 module directory for ${target}" >&2
+    return 1
+  fi
+
+  default_dir="$(grub_install_default_module_dir)"
+  if [[ -n "$default_dir" ]]; then
+    candidate="${default_dir//<platform>/$target}"
+    if grub_module_dir_usable "$candidate"; then
+      echo "$candidate"
+      return 0
+    fi
+  fi
+
+  install_path="$(resolve_command "$GRUB2_INSTALL")"
+  if [[ -n "$install_path" ]]; then
+    install_path="$(canonical_path "$install_path")"
+    install_prefix="$(dirname "$(dirname "$install_path")")"
+    candidate="${install_prefix}/lib/grub/${target}"
+    if grub_module_dir_usable "$candidate"; then
+      echo "$candidate"
+      return 0
+    fi
+  fi
+
+  for candidate in "/usr/lib/grub/${target}" "/usr/lib/grub2/${target}"; do
+    if grub_module_dir_usable "$candidate"; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+run_grub_install() {
+  local target="$1"
+  local module_dir="$2"
+  shift 2
+
+  local cmd=(
+    "$GRUB2_INSTALL"
+    "--target=${target}"
+    "--directory=${module_dir}"
+    "--boot-directory=${USBMNT}/boot"
+    "$@"
+    "$USBDEV"
+  )
+
+  echo "Running sudo ${cmd[*]} ..."
+  sudo "${cmd[@]}"
+  if [[ $? -ne 0 ]]; then
+    echo "ERROR: ${GRUB2_INSTALL} returned with an error exit status."
+    exit 1
+  fi
+}
+
 # Sanity check : GRUB2
-if which grub2-install &>/dev/null; then
+if [[ -n "$GLIM_GRUB_INSTALL" ]]; then
+  if resolve_command "$GLIM_GRUB_INSTALL" &>/dev/null; then
+    GRUB2_INSTALL="$GLIM_GRUB_INSTALL"
+  else
+    echo "ERROR: GLIM_GRUB_INSTALL command not found: ${GLIM_GRUB_INSTALL}"
+    exit 1
+  fi
+elif resolve_command grub2-install &>/dev/null; then
   GRUB2_INSTALL="grub2-install"
-  GRUB2_DIR="grub2"
-elif which grub-install &>/dev/null; then
+elif resolve_command grub-install &>/dev/null; then
   GRUB2_INSTALL="grub-install"
-  GRUB2_DIR="grub"
 fi
 if [[ -z "$GRUB2_INSTALL" ]]; then
   echo "ERROR: grub2-install or grub-install commands not found."
   exit 1
 fi
+case "$(basename "$GRUB2_INSTALL")" in
+  grub2-install)
+    GRUB2_DIR="grub2"
+    ;;
+  *)
+    GRUB2_DIR="grub"
+    ;;
+esac
 
 # Sanity check : Our GRUB2 configuration
 GRUB2_CONF="`dirname $0`/grub2"
@@ -71,21 +194,38 @@ if [[ -z "$USBMNT" ]]; then
 fi
 echo "Found mount point for filesystem : ${USBMNT}"
 
-BIOS=true
+BIOS=false
+EFI=false
+
 # Check BIOS support
-if [[ -d /usr/lib/grub/i386-pc ]]; then
+BIOS_GRUB_DIR="$(find_grub_module_dir i386-pc)"
+if [[ -n "$BIOS_GRUB_DIR" ]]; then
   BIOS=true
+  echo "Found GRUB2 BIOS modules : ${BIOS_GRUB_DIR}"
 else
-  echo "WARNING: no /usr/lib/grub/i386-pc dir. Skipping Grub BIOS support"
-  BIOS=false
-  EFI=true
+  echo "WARNING: no usable GRUB2 i386-pc module dir. Skipping Grub BIOS support"
+fi
+
+# Check EFI support
+EFI_GRUB_DIR="$(find_grub_module_dir x86_64-efi)"
+if [[ -n "$EFI_GRUB_DIR" ]]; then
+  EFI_AVAILABLE=true
+  echo "Found GRUB2 EFI modules : ${EFI_GRUB_DIR}"
+else
+  EFI_AVAILABLE=false
+  echo "WARNING: no usable GRUB2 x86_64-efi module dir. Skipping Grub EFI support"
+fi
+
+if [[ $BIOS == false && $EFI_AVAILABLE == false ]]; then
+  echo "ERROR: neither support for BIOS or EFI was found"
+  exit 1
 fi
 
 #
 # EFI or regular?
 #
 
-if [[ $BIOS == true ]]; then
+if [[ $BIOS == true && $EFI_AVAILABLE == true ]]; then
   # Set the target
   read -n 1 -s -p "Install for EFI in addition to standard BIOS? (Y/n) " EFI
   if [[ "$EFI" == "n" ]]; then
@@ -95,16 +235,8 @@ if [[ $BIOS == true ]]; then
     EFI=true
     echo "y"
   fi
-fi
-
-# Sanity check : for EFI, an additional package might be missing
-if [[ $EFI == true && ! -d /usr/lib/grub/x86_64-efi ]]; then
-  if [[ $BIOS == false ]]; then
-    echo "ERROR: neither support for BIOS or EFI was found"
-    exit 1
-  else
-    echo "WARNING: no /usr/lib/grub/x86_64-efi dir (grub2-efi-x64-modules rpm or grub-efi-amd64-bin deb missing?)"
-  fi
+elif [[ $EFI_AVAILABLE == true ]]; then
+  EFI=true
 fi
 
 
@@ -123,22 +255,10 @@ fi
 
 # Install GRUB2
 if [[ $BIOS == true ]]; then
-  GRUB_TARGET="--target=i386-pc"
-  echo "Running ${GRUB2_INSTALL} ${GRUB_TARGET} --boot-directory=${USBMNT}/boot ${USBDEV} (with sudo) ..."
-  sudo ${GRUB2_INSTALL} ${GRUB_TARGET} --boot-directory=${USBMNT}/boot ${USBDEV}
-  if [[ $? -ne 0 ]]; then
-      echo "ERROR: ${GRUB2_INSTALL} returned with an error exit status."
-      exit 1
-  fi
+  run_grub_install i386-pc "$BIOS_GRUB_DIR"
 fi
 if [[ $EFI == true ]]; then
-  GRUB_TARGET="--target=x86_64-efi --efi-directory=${USBMNT} --removable"
-  echo "Running ${GRUB2_INSTALL} ${GRUB_TARGET} --boot-directory=${USBMNT}/boot ${USBDEV} (with sudo) ..."
-  sudo ${GRUB2_INSTALL} ${GRUB_TARGET} --boot-directory=${USBMNT}/boot ${USBDEV}
-  if [[ $? -ne 0 ]]; then
-    echo "ERROR: ${GRUB2_INSTALL} returned with an error exit status."
-    exit 1
-  fi
+  run_grub_install x86_64-efi "$EFI_GRUB_DIR" "--efi-directory=${USBMNT}" --removable
 fi
 
 # Check USB mount dir write permission, to use sudo if missing
@@ -169,4 +289,3 @@ args=(
 for DIR in $(sed "${args[@]}" "$(dirname "$0")"/README.md); do
   [[ -d ${USBMNT}/boot/iso/${DIR} ]] || ${CMD_PREFIX} mkdir ${USBMNT}/boot/iso/${DIR}
 done
-

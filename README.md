@@ -48,6 +48,18 @@ the filesystem label 'GLIM', mount it, clone this git repository and just run
 
     ./glim.sh
 
+On NixOS, or when GRUB is not installed globally, run the script from a shell
+which provides `grub-install`. For example, for an EFI install :
+
+    nix shell nixpkgs#grub2_efi -c ./glim.sh
+
+If GRUB uses non-standard paths, the script can be pointed at a specific
+installer or module directory :
+
+    GLIM_GRUB_INSTALL=/path/to/grub-install ./glim.sh
+    GLIM_GRUB_I386_PC_DIR=/path/to/lib/grub/i386-pc ./glim.sh
+    GLIM_GRUB_X86_64_EFI_DIR=/path/to/lib/grub/x86_64-efi ./glim.sh
+
 Once finished, you may change the filesystem label to anything you like.
 
 The supported `boot/iso/` sub-directories (in alphabetical order) are :
@@ -230,4 +242,3 @@ copyright somewhere, do what you want with it.
 The background is "Wallpaper grey" © 2008 payalnic (DeviantArt)
 The `ascii.pf2` font comes from GRUB, which is GPLv3+ licensed. For more
 details as well as the source code, see http://www.gnu.org/software/grub/
-

@@ -35,9 +35,18 @@ If you get the following message :
 
     source_dir doesn't exist. Please specify --target or --directory
 
-Just find your grub2 directory and specify it as asked. Example :
+Just find your grub2 directory and specify it as asked. Examples :
 
     grub2-install --directory=/usr/lib/grub/i386-pc --boot-directory=${USBMNT:-/mnt}/boot /dev/${USBDEV}
+    grub-install --directory=/path/to/lib/grub/x86_64-efi --target=x86_64-efi --efi-directory=${USBMNT:-/mnt} --removable --boot-directory=${USBMNT:-/mnt}/boot /dev/${USBDEV}
+
+The `glim.sh` script does this detection automatically from the selected
+`grub-install` command, including GRUB installed outside `/usr` such as on
+NixOS. For unusual layouts, override the detected values :
+
+    GLIM_GRUB_INSTALL=/path/to/grub-install ./glim.sh
+    GLIM_GRUB_I386_PC_DIR=/path/to/lib/grub/i386-pc ./glim.sh
+    GLIM_GRUB_X86_64_EFI_DIR=/path/to/lib/grub/x86_64-efi ./glim.sh
 
 Use --force if your partitions start at 63 instead of more, such as 2048,
 though you might want to repartition and reformat.
@@ -62,4 +71,3 @@ Now create and populate the `${USBMNT}/boot/iso/` sub-directories you want.
 Example :
 
     mkdir -p ${USBMNT:-/mnt}/boot/iso/ubuntu
-
